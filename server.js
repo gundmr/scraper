@@ -1,120 +1,185 @@
-var express = require("express");
-var logger = require("morgan");
-var mongoose = require("mongoose");
+var express = require('express');
+var bodyParser = require('body-parser');
+var logger = require('morgan');
+var mongoose = require('mongoose');
+var path = require('path');
 
-// Scraping tools
-var axios = require("axios");
-var cheerio = require("cheerio");
+var Note = require('./models/Note.js');
+var Article = require('./models/Article.js');
 
-// Require all models
-var db = require("./models");
+var request = require('request');
+var cheerio = require('cheerio');
 
-var PORT = process.env.PORT || 3040;
+mongoose.Promise = Promise;
+mongoose.connect("mongodb://heroku_xd394bdd:ncntvcs1jnacmt48iaiodvflb7@ds161016.mlab.com:61016/heroku_xd394bdd" , {
+	useMongoClient: true
+});
 
-// Initialize Express
+var db = mongoose.connection;
+
+var PORT = process.env.PORT || 3000;
+
 var app = express();
 
-// Configure middleware
-// Use morgan logger for logging requests
 app.use(logger("dev"));
-// Parse request body as JSON
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-// Make public a static folder
+app.use(bodyParser.urlencoded({
+	extended: false
+}));
+
 app.use(express.static("public"));
 
-// Connect to the Mongo DB
-// If deployed, use the deployed database. Otherwise use the local mongoHeadlines database
-var MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost/mongoHeadlines";
+var exphbs = require('express-handlebars');
+app.engine("handlebars", exphbs({
+	defaultLayout: "main",
+	partialsDir: path.join(__dirname, "/views/layouts/partials")
+}));
+app.set("view engine", "handlebars");
 
-mongoose.connect(MONGODB_URI);
-
-// ////////////////////////////////////////////////////////////
-// Routes
-// A GET route for scraping the echoJS website
-app.get("/scrape", function(req, res) {
-  // First, we grab the body of the html with axios
-  axios.get("https://www.bbc.com/news").then(function(response) {
-    // Then, we load that into cheerio and save it to $ for a shorthand selector
-    var $ = cheerio.load(response.data);
-
-    // Now, we grab every h2 within an article tag, and do the following:
-    $("h5").each(function(i, element) {
-      // Save an empty result object
-      var result = {};
-
-      // Add the text and href of every link, and save them as properties of the result object
-      result.title = $(this)
-        .children("a")
-        .text();
-      result.link = $(this)
-        .children("a")
-        .attr("href");
-
-      // Create a new Article using the `result` object built from scraping
-      db.Article.create(result)
-        .then(function(dbArticle) {
-          // View the added result in the console
-          console.log(dbArticle);
-        })
-        .catch(function(err) {
-          // If an error occurred, log it
-          console.log(err);
-        });
-    });
-
-    // Send a message to the client
-    res.send("Scrape Complete!");
-  });
+db.on("error", function(error){
+	console.log("Mongoose Error: ", error);
 });
 
-// Route for getting all Articles from the db
-app.get("/articles", function(req, res) {
-    // Find all results from the scrapedData collection in the db
-    db.Article.find()
-      // Throw any errors to the console
-      .then(function(dbPopulate) {
-        // If any found, send them to the client
-        res.json(dbPopulate);
-      })
-      .catch(function(err) {
-        // If an error occurs, send it back to the client
-        res.json(err);
-      });
+db.once("open", function(){
+	console.log("Mongoose connection successful.");
 });
 
-// Route for grabbing a specific Article by id, populate it with it's note
-app.get("/articles/:id", function(req, res) {
-  db.Article.findById(req.params.id)
-  .populate("note")
-  .then(function(dbPopulate) {
-    // If any found, send them to the client
-    res.json(dbPopulate);
-  })
-  .catch(function(err) {
-    // If an error occurs, send it back to the client
-    res.json(err);
-  });
+app.get("/", function(req,res){
+	Article.find({"saved": false}).limit(20).exec(function(error,data){
+		var hbsObject = {
+			article: data
+		};
+		console.log(hbsObject);
+		res.render("home", hbsObject);
+	});
 });
 
-// Route for saving/updating an Article's associated Note
-app.post("/articles/:id", function(req, res) {
-  db.Note.create(req.body)
-    .then(function(dbPopulate) {
-      
-      return db.Article.findOneAndUpdate({_id: req.params.id}, { $push: { note: dbPopulate._id } }, { new: true });
-    })
-    .then(function(dbPopulate) {
-      // If updated successfully, send it back to the client
-      res.json(dbPopulate);
-    })
-    .catch(function(err) {
-      // If an error occurs, send it back to the client
-      res.json(err);
-    });
+app.get("/saved", function(req,res){
+	Article.find({"saved": true}).populate("notes").exec(function(error, articles){
+		var hbsObject = {
+			article: articles
+		};
+		res.render("saved", hbsObject);
+	});
 });
 
+app.get("/scrape", function(req,res){
+	request("https://www.nytimes.com/", function(error,response, html){
+		var $ = cheerio.load(html);
+		$("article").each(function(i,element){
+			var result = {};
+			result.title = $(this).children("h2").text();
+			result.summary = $(this).children(".summary").text();
+			result.link = $(this).children("h2").children("a").attr("href");
 
-app.listen(PORT, function () {
-  console.log(`App running on port ${PORT}`);
+			var entry = new Article(result);
+
+			entry.save(function(err, doc){
+				if(err){
+					console.log(err);
+				}
+				else{
+					console.log(doc);
+				}
+			});
+		});
+		res.send("Scrape Complete");
+	});
+});
+
+app.get("/articles", function(req,res){
+	Article.find({}).limit(20).exec(function(error, doc){
+		if(error){
+			console.log(error);
+		}
+		else{
+			res.json(doc);
+		}
+	});
+});
+
+app.get("/articles/:id", function(req,res){
+	Article.findOne({ "_id": req.params.id})
+	.populate("note")
+	.exec(function(error, doc){
+		if(error){
+			console.log(error);
+		}
+		else{
+			res.json(doc);
+		}
+	});
+});
+
+app.post("/articles/save/:id", function(req,res){
+	Article.findOneAndUpdate({ "_id": req.params.id}, {"saved": true})
+	.exec(function(err, doc){
+		if(err){
+			console.log(err);
+		}
+		else{
+			res.send(doc);
+		}
+	});
+});
+
+app.post("/articles/delete/:id", function(req,res){
+	Article.findOneAndUpdate({ "_id": req.params.id}, {"saved": false, "notes":[]})
+	.exec(function(err, doc){
+		if(err){
+			console.log(err);
+		}
+		else{
+			res.send(doc);
+		}
+	});
+});
+
+app.post("notes/save/:id", function(req,res){
+	var newNote = new Note({
+		body: req.body.text,
+		article: req.params.id
+	});
+	console.log(req.body)
+	newNote.save(function(error, note){
+		if(error){
+			console.log(error);
+		}
+		else{
+			Article.findOneAndUpdate({ "_id": req.params.id}, {$push: { "notes": note } })
+			.exec(function(err){
+				if(err){
+					console.log(err);
+					res.send(err);
+				}
+				else{
+					res.send(note);
+				}
+			});
+		}
+	});
+});
+
+app.delete("/notes/delete/:note_id/:article", function(req,res){
+	Note.findOneAndRemove({"_id": req.params.note.id}, function(err){
+		if(err){
+			console.log(err);
+			res.send(err);
+		}
+		else{
+			Article.findOneAndUpdate({"_id": req.params.article_id}, {$pull: {"notes": req.params.note_id}})
+				.exec(function(err){
+					if(err){
+						console.log(err);
+						res.send(err); 
+					}
+					else{
+						res.send("Note Deleted");
+					}
+				});
+		}
+	});
+});
+
+app.listen(PORT, function(){
+	console.log("App running on PORT: " + PORT);
 });
